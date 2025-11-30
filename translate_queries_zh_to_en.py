@@ -1,11 +1,30 @@
 import json
 import time
 from pathlib import Path
-try:
-    from googletrans import Translator
-except ImportError:
-    print("Please install googletrans: pip install googletrans==4.0.0-rc1")
-    exit(1)
+import concurrent.futures
+from deep_translator import GoogleTranslator
+
+def translate_one(item, translator=None):
+    """
+    Translates a single item. 
+    """
+    original_query = item['query']
+    try:
+        # Translate to English
+        # deep_translator creates a new instance easily
+        translator = GoogleTranslator(source='zh-CN', target='en')
+        translation = translator.translate(original_query)
+        translated_query = {
+            "query": translation,
+            "language": "en"
+        }
+        return translated_query
+    except Exception as e:
+        print(f"Error translating query: {original_query[:30]}... Error: {e}")
+        return {
+            "query": original_query,
+            "language": "zh_translation_failed"
+        }
 
 def translate_queries(input_file, output_file):
     try:
@@ -15,34 +34,22 @@ def translate_queries(input_file, output_file):
         print(f"Error: Input file '{input_file}' not found.")
         return
 
-    translator = Translator()
     translated_queries = []
-    
-    total = len(data['queries'])
+    queries = data['queries']
+    total = len(queries)
     print(f"Found {total} queries to translate.")
 
-    for i, item in enumerate(data['queries']):
-        original_query = item['query']
-        try:
-            # Translate to English
-            translation = translator.translate(original_query, src='zh-cn', dest='en')
-            translated_query = {
-                "query": translation.text,
-                "language": "en"
-            }
-            translated_queries.append(translated_query)
-            print(f"[{i+1}/{total}] Translated: {translation.text[:30]}...")
-            
-            # Sleep briefly to avoid hitting rate limits too fast
-            time.sleep(0.5)
-            
-        except Exception as e:
-            print(f"Error translating query {i+1}: {e}")
-            # Keep original if translation fails, or handle as needed
-            translated_queries.append({
-                "query": original_query,
-                "language": "zh_translation_failed"
-            })
+    # Use ThreadPoolExecutor for parallel translation
+    # Adjust max_workers as needed. Too many might trigger rate limits.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Submit all tasks
+        future_to_query = {executor.submit(translate_one, item): item for item in queries}
+        
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_query)):
+            result = future.result()
+            translated_queries.append(result)
+            if (i + 1) % 10 == 0:
+                print(f"[{i+1}/{total}] Processed...")
 
     output_data = {
         "total_queries": len(translated_queries),
