@@ -1,0 +1,120 @@
+import datetime
+import hashlib
+import json
+import re
+import sys
+import os
+import time
+import traceback
+import numpy as np
+import pandas as pd
+import requests
+import uuid
+import string
+import hmac
+import base64
+import urllib.parse
+import random
+import concurrent.futures
+
+APP_ID = '0599323503'
+APP_KEY = 'ZTluHGficaycuHPV'
+URI = '/chatgpt/completions'
+DOMAIN = 'chatgpt-api.vivo.lan:8080'
+
+def gen_nonce(length=8):
+    chars = string.ascii_lowercase + string.digits
+    return ''.join([random.choice(chars) for _ in range(length)])
+
+def gen_canonical_query_string(params):
+    s = ''
+    if params:
+        escape_uri = urllib.parse.quote
+        raw = []
+        for k in sorted(params.keys()):
+            tmp_tuple = (escape_uri(k), escape_uri(str(params[k])))
+            raw.append(tmp_tuple)
+        s = "&".join("=".join(kv) for kv in raw)
+    return s
+
+def gen_signature_1(app_secret, signing_string):
+    bytes_secret = app_secret.encode('utf-8')
+    hash_obj = hmac.new(bytes_secret, signing_string, hashlib.sha256)
+    bytes_sig = base64.b64encode(hash_obj.digest())
+    signature = str(bytes_sig, encoding='utf-8')
+    return signature
+
+def gen_sign_headers(app_id, app_key, method, uri, query):
+    method = str(method).upper()
+    timestamp = str(int(time.time()))
+    nonce = gen_nonce()
+    canonical_query_string = gen_canonical_query_string(query)
+    signed_headers_string = 'x-ai-gateway-app-id:{}\nx-ai-gateway-timestamp:{}\nx-ai-gateway-nonce:{}'.format(app_id, timestamp, nonce)
+    signing_string = '{}\n{}\n{}\n{}\n{}\n{}'.format(method, uri, canonical_query_string, app_id, timestamp, signed_headers_string)
+    signing_string = signing_string.encode('utf-8')
+    signature = gen_signature_1(app_key, signing_string)
+    return {'X-AI-GATEWAY-APP-ID': app_id, 'X-AI-GATEWAY-TIMESTAMP': timestamp, 'X-AI-GATEWAY-NONCE': nonce,
+        'X-AI-GATEWAY-SIGNED-HEADERS': "x-ai-gateway-app-id;x-ai-gateway-timestamp;x-ai-gateway-nonce", 'X-AI-GATEWAY-SIGNATURE': signature}
+
+def get_gpt_answer(sys_prompt:str, prompt: str, model: str = 'vivo-BlueLM-TB-Pro', provider: str = 'vivo', domain: str = 'chatgpt-api.vivo.lan:8080') -> str:
+    try_time = 2
+    for i in range(try_time):
+        try:
+            params = {'requestId': str(uuid.uuid4())}
+            data = {
+                'systemPrompt': sys_prompt,
+                'prompt': prompt,
+                'task_type': 'chatgpt',
+                'sessionId': str(uuid.uuid4()),
+                'model': model,
+                'provider': provider,
+                'temperature': '0.1',
+            }
+            url = 'http://{}{}'.format(domain, URI)
+            headers = gen_sign_headers(APP_ID, APP_KEY, 'POST', URI, params)
+            response = requests.post(url, json=data, headers=headers, params=params, timeout=60)
+            if response.status_code == 200:
+                recv_data = response.json()
+                return recv_data['data']['content']
+            else:
+                print(f'【{model} try {i+1} error')
+        except Exception as e:
+            print(model)
+            traceback.print_exc()
+            time.sleep(0.1)
+    return 'request exception'
+
+def process_query(row, col_name):
+    query = row[col_name]
+    print(f"Processing query: {query}")
+    res = get_gpt_answer('', query, model='ernie-4.5-turbo-32k-mb', provider='baidu', domain=DOMAIN)
+    return res
+
+if __name__ == "__main__":
+    input_file = 'openbadcase_res.xlsx'
+    col_name = 'query'
+    df = pd.read_excel(input_file)
+    
+    badcase_res = []
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_row = {executor.submit(process_query, row, col_name): row for _, row in df.iterrows()}
+        
+        for future in concurrent.futures.as_completed(future_to_row):
+            row = future_to_row[future]
+            try:
+                res = future.result()
+                badcase_res.append(res)
+                print(f"回答: {res}")
+                print("=" * 100)
+            except Exception as e:
+                traceback.print_exc()
+
+    out_df = pd.DataFrame({
+        'query': df[col_name],
+        'content': badcase_res
+    })
+
+    output_file = 'openbadcase_ernieres.xlsx'
+    out_df.to_excel(output_file, index=False)
+    print(f"所有结果已保存到: {output_file}")
